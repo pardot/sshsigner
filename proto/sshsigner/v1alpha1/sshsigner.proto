@@ -1,0 +1,76 @@
+syntax = "proto3";
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+package sshsigner.v1alpha1;
+option go_package = "github.com/pardot/sshsigner/proto/sshsigner/v1alpha1;sshsigner";
+
+message SignUserKeyRequest {
+  // The users public key to sign, in authorized_keys format
+  string public_key = 1 [json_name="public_key"];
+}
+
+message SignUserKeyResponse {
+  // signed certificate to use to connect to the host, in authorized_keys format
+  string signed_certificate = 1 [json_name="signed_certificate"];
+}
+
+message SignHostKeyRequest {
+  // The host key to sign, in authorized_keys format
+  string public_key = 1 [json_name="public_key"];
+  // The hostnames to embed in the certificate principals
+  repeated string hostnames = 2 [json_name="hostnames"];
+}
+
+message SignHostKeyResponse {
+  // signed host key, in authorized_keys format
+  string signed_certificate = 1 [json_name="signed_certificate"];
+}
+
+message UserSignersResponse {
+  repeated VerificationKey verification_keys = 1 [json_name="verification_keys"];
+}
+
+message HostSignersResponse {
+  repeated VerificationKey verification_keys = 1 [json_name="verification_keys"];
+}
+
+// Signer is used to sign SSH keys
+service Signer {
+  // Sign a users key for access
+  rpc SignUserKey(SignUserKeyRequest) returns (SignUserKeyResponse) {
+    option (google.api.http) = {
+      post: "/sshsigner/v1alpha1/userkey"
+      body: "*"
+    };
+  }
+
+  // Sign a host key
+  rpc SignHostKey(SignHostKeyRequest) returns (SignHostKeyResponse) {
+    option (google.api.http) = {
+      post: "/sshsigner/v1alpha1/hostkey"
+      body: "*"
+    };
+  }
+
+  // Get a list of currently valid signers for user keys
+  rpc UserSigners(google.protobuf.Empty) returns (UserSignersResponse) {
+    option (google.api.http) = {
+      get: "/sshsigner/v1alpha1/usersigners"
+    };
+  }
+
+  // Get a list of currently valid signers for host keys
+  rpc HostSigners(google.protobuf.Empty) returns (HostSignersResponse) {
+    option (google.api.http) = {
+      get: "/sshsigner/v1alpha1/hostsigners"
+    };
+  }
+}
+
+message VerificationKey {
+  // SSH authorized_keys format
+  bytes key = 1 [json_name="key"];
+  google.protobuf.Timestamp expiry = 2 [json_name="expiry"];
+}

@@ -1,0 +1,241 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "sshsigner/v1alpha1/sshsigner.proto",
+    "version": "version not set"
+  },
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "paths": {
+    "/sshsigner/v1alpha1/hostkey": {
+      "post": {
+        "summary": "Sign a host key",
+        "operationId": "Signer_SignHostKey",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1alpha1SignHostKeyResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response",
+            "schema": {
+              "$ref": "#/definitions/runtimeError"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/v1alpha1SignHostKeyRequest"
+            }
+          }
+        ],
+        "tags": [
+          "Signer"
+        ]
+      }
+    },
+    "/sshsigner/v1alpha1/hostsigners": {
+      "get": {
+        "summary": "Get a list of currently valid signers for host keys",
+        "operationId": "Signer_HostSigners",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1alpha1HostSignersResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response",
+            "schema": {
+              "$ref": "#/definitions/runtimeError"
+            }
+          }
+        },
+        "tags": [
+          "Signer"
+        ]
+      }
+    },
+    "/sshsigner/v1alpha1/userkey": {
+      "post": {
+        "summary": "Sign a users key for access",
+        "operationId": "Signer_SignUserKey",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1alpha1SignUserKeyResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response",
+            "schema": {
+              "$ref": "#/definitions/runtimeError"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/v1alpha1SignUserKeyRequest"
+            }
+          }
+        ],
+        "tags": [
+          "Signer"
+        ]
+      }
+    },
+    "/sshsigner/v1alpha1/usersigners": {
+      "get": {
+        "summary": "Get a list of currently valid signers for user keys",
+        "operationId": "Signer_UserSigners",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1alpha1UserSignersResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response",
+            "schema": {
+              "$ref": "#/definitions/runtimeError"
+            }
+          }
+        },
+        "tags": [
+          "Signer"
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "protobufAny": {
+      "type": "object",
+      "properties": {
+        "type_url": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string",
+          "format": "byte"
+        }
+      }
+    },
+    "runtimeError": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "message": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/protobufAny"
+          }
+        }
+      }
+    },
+    "v1alpha1HostSignersResponse": {
+      "type": "object",
+      "properties": {
+        "verification_keys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/v1alpha1VerificationKey"
+          }
+        }
+      }
+    },
+    "v1alpha1SignHostKeyRequest": {
+      "type": "object",
+      "properties": {
+        "public_key": {
+          "type": "string",
+          "title": "The host key to sign, in authorized_keys format"
+        },
+        "hostnames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "title": "The hostnames to embed in the certificate principals"
+        }
+      }
+    },
+    "v1alpha1SignHostKeyResponse": {
+      "type": "object",
+      "properties": {
+        "signed_certificate": {
+          "type": "string",
+          "title": "signed host key, in authorized_keys format"
+        }
+      }
+    },
+    "v1alpha1SignUserKeyRequest": {
+      "type": "object",
+      "properties": {
+        "public_key": {
+          "type": "string",
+          "title": "The users public key to sign, in authorized_keys format"
+        }
+      }
+    },
+    "v1alpha1SignUserKeyResponse": {
+      "type": "object",
+      "properties": {
+        "signed_certificate": {
+          "type": "string",
+          "title": "signed certificate to use to connect to the host, in authorized_keys format"
+        }
+      }
+    },
+    "v1alpha1UserSignersResponse": {
+      "type": "object",
+      "properties": {
+        "verification_keys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/v1alpha1VerificationKey"
+          }
+        }
+      }
+    },
+    "v1alpha1VerificationKey": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "format": "byte",
+          "title": "SSH authorized_keys format"
+        },
+        "expiry": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}
