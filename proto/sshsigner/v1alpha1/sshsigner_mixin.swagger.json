@@ -1,0 +1,34 @@
+{
+  "paths": {
+    "/sshsigner/v1alpha1/hostsigners": {
+      "get": {
+        "summary": "Get a list of currently valid signers for host keys",
+        "operationId": "HostSigners",
+        "responses": {
+          "200": {
+            "headers": {
+              "Cache-Control": {
+                "description": "Information about the cachability of the response",
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sshsigner/v1alpha1/usersigners": {
+      "get": {
+        "responses": {
+          "200": {
+            "headers": {
+              "Cache-Control": {
+                "description": "Information about the cachability of the response",
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
