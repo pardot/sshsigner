@@ -95,8 +95,6 @@ func TestSSHSigner(t *testing.T) {
 			gotKeys = append(gotKeys, string(vk.Key))
 		}
 
-		fmt.Printf("want: %#v\n\ngot:  %#v\n\n", wantKeys, gotKeys)
-
 		if diff := cmp.Diff(wantKeys, gotKeys, cmpopts.SortSlices(func(x, y string) bool { return strings.Compare(x, y) < 0 })); diff != "" {
 			t.Errorf("Unexpected keys returned: %s", diff)
 		}
@@ -560,7 +558,6 @@ func TestSSHSigner_SignHostKey(t *testing.T) {
 					t.Fatalf("wanted a %T, got a %T", &ssh.Certificate{}, cert)
 				}
 
-				fmt.Printf("%#v\n", cert)
 				if !tc.wantValidBefore.IsZero() && !tc.wantValidBefore.Equal(time.Unix(int64(cert.ValidBefore), 0)) {
 					t.Errorf("wanted valid before %v, got %v", tc.wantValidBefore, time.Unix(int64(cert.ValidBefore), 0))
 				}
