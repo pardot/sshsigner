@@ -29,9 +29,9 @@ import (
 )
 
 const (
-	validAfterDurationSkew     = -1 * time.Minute
-	maxUserSignedValidDuration = 15 * time.Minute
-	hostSignedValidDuration    = 24 * time.Hour
+	validAfterDurationSkew            = -1 * time.Minute
+	defaultMaxUserSignedValidDuration = 15 * time.Minute
+	defaultHostSignedValidDuration    = 24 * time.Hour
 
 	nonceValidity = 24 * time.Hour
 )
@@ -76,6 +76,9 @@ type SSHSigner struct {
 	remoteCacheSplay time.Duration
 	rand             *pseudorand.Rand
 
+	userCertValidForMax time.Duration
+	hostCertValidFor    time.Duration
+
 	NonceRec NonceRecorder
 
 	Verifier         TokenVerifier
@@ -94,6 +97,23 @@ func WithUserKeysource(ks KeySource) SignerOpt {
 func WithHostKeysource(ks KeySource) SignerOpt {
 	return func(s *SSHSigner) {
 		s.hostKeySource = ks
+	}
+}
+
+// WithHostCertValidityPeriod sets the duration that host certs are valid for,
+// after signing time. The default is 24 hours.
+func WithHostCertValidityPeriod(p time.Duration) SignerOpt {
+	return func(s *SSHSigner) {
+		s.hostCertValidFor = p
+	}
+}
+
+// WithMaxUserCertValidityPeriod sets the maximum duration that user certs are
+// valid for, after signing time. The default is 15 minutes. If the submitted
+// claims expire in a time less than this, that time will be used instead.
+func WithMaxUserCertValidityPeriod(p time.Duration) SignerOpt {
+	return func(s *SSHSigner) {
+		s.userCertValidForMax = p
 	}
 }
 
@@ -132,13 +152,15 @@ type SignerSource func(ctx context.Context) (crypto.Signer, error)
 
 func New(l logrus.FieldLogger, userSigner crypto.Signer, hostSigner crypto.Signer, nonceRec NonceRecorder, v TokenVerifier, aud string, validAWSAccounts []string, opts ...SignerOpt) (*SSHSigner, error) {
 	ss := &SSHSigner{
-		Log:              l.WithField("component", "sshsigner"),
-		Verifier:         v,
-		Audience:         aud,
-		ValidAWSAccounts: validAWSAccounts,
-		NonceRec:         nonceRec,
-		userSigner:       userSigner,
-		hostSigner:       hostSigner,
+		Log:                 l.WithField("component", "sshsigner"),
+		Verifier:            v,
+		Audience:            aud,
+		ValidAWSAccounts:    validAWSAccounts,
+		NonceRec:            nonceRec,
+		userSigner:          userSigner,
+		hostSigner:          hostSigner,
+		userCertValidForMax: defaultMaxUserSignedValidDuration,
+		hostCertValidFor:    defaultHostSignedValidDuration,
 	}
 
 	for _, o := range opts {
@@ -220,7 +242,7 @@ func (s *SSHSigner) SignUserKey(ctx context.Context, req *sshsigner.SignUserKeyR
 	logger = logger.WithField("principals", principals)
 
 	now := s.now()
-	validBefore := now.Add(maxUserSignedValidDuration)
+	validBefore := now.Add(s.userCertValidForMax)
 	if claims.Expiry.Time().Before(validBefore) {
 		validBefore = claims.Expiry.Time()
 	}
@@ -337,7 +359,7 @@ func (s *SSHSigner) SignHostKey(ctx context.Context, req *sshsigner.SignHostKeyR
 		ID:          parn.String(),
 		Principals:  principals,
 		ValidAfter:  now.Add(validAfterDurationSkew),
-		ValidBefore: now.Add(hostSignedValidDuration),
+		ValidBefore: now.Add(s.hostCertValidFor),
 	}
 
 	signed, err := signRequest(s.hostSigner, sreq)
