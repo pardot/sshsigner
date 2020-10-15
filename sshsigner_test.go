@@ -95,8 +95,6 @@ func TestSSHSigner(t *testing.T) {
 			gotKeys = append(gotKeys, string(vk.Key))
 		}
 
-		fmt.Printf("want: %#v\n\ngot:  %#v\n\n", wantKeys, gotKeys)
-
 		if diff := cmp.Diff(wantKeys, gotKeys, cmpopts.SortSlices(func(x, y string) bool { return strings.Compare(x, y) < 0 })); diff != "" {
 			t.Errorf("Unexpected keys returned: %s", diff)
 		}
@@ -156,6 +154,7 @@ func TestSSHSigner_SignUserKey(t *testing.T) {
 		wantErr         string
 		wantPrincipals  []string
 		wantValidBefore time.Time
+		opts            []SignerOpt
 	}{
 		{
 			name: "Valid",
@@ -281,6 +280,32 @@ func TestSSHSigner_SignUserKey(t *testing.T) {
 			},
 			wantErr: "invalid nonce",
 		},
+		{
+			name: "Custom validity",
+			req: &sshsigner.SignUserKeyRequest{
+				PublicKey: string(ssh.MarshalAuthorizedKey(fakePublicKey)),
+			},
+			claims: &oidc.Claims{
+				Subject: "subject",
+				// longer than we expect, should be forced down to max
+				Expiry: oidc.NewUnixTime(now.Add(120 * time.Minute)),
+				ACR:    ACRMultiFactorPhysical,
+				AMR:    []string{AMROTP},
+				Nonce:  "nonce123",
+				Extra: map[string]interface{}{
+					"groups": []interface{}{"ops", "developers"},
+				},
+			},
+			wantPrincipals: []string{
+				"group:ops",
+				"group:developers",
+				fmt.Sprintf("acr:%s", ACRMultiFactorPhysical),
+				fmt.Sprintf("amr:%s", AMROTP),
+			},
+			wantErr:         "",
+			wantValidBefore: now.Add(60 * time.Minute),
+			opts:            []SignerOpt{WithMaxUserCertValidityPeriod(1 * time.Hour)},
+		},
 	}
 
 	for _, tc := range cases {
@@ -305,6 +330,7 @@ func TestSSHSigner_SignUserKey(t *testing.T) {
 				verifier,
 				"aud",
 				[]string{},
+				tc.opts...,
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -348,6 +374,8 @@ func TestSSHSigner_SignUserKey(t *testing.T) {
 }
 
 func TestSSHSigner_SignHostKey(t *testing.T) {
+	now := time.Now().Round(time.Second) // certs only have second granularity
+
 	hostSigner, _ := newMockSigner(t)
 	userSigner, _ := newMockSigner(t)
 
@@ -363,6 +391,8 @@ func TestSSHSigner_SignHostKey(t *testing.T) {
 		validAWSAccounts []string
 		playedNonces     []string
 		wantErr          string
+		wantValidBefore  time.Time
+		opts             []SignerOpt
 	}{
 		{
 			name: "Valid",
@@ -458,6 +488,24 @@ func TestSSHSigner_SignHostKey(t *testing.T) {
 			validAWSAccounts: []string{"1234567"},
 			wantErr:          "invalid nonce",
 		},
+		{
+			name: "Custom Expiry",
+			req: &sshsigner.SignHostKeyRequest{
+				PublicKey: string(ssh.MarshalAuthorizedKey(fakePublicKey)),
+				Hostnames: []string{"instance.example.com"},
+			},
+			claims: &oidc.Claims{
+				Nonce: "abc",
+				Extra: map[string]interface{}{
+					"awsInstance": true,
+					"arn":         "arn:aws:sts::1234567:assumed-role/aws:ec2-instance/i-1234567",
+				},
+			},
+			validAWSAccounts: []string{"1234567"},
+			wantErr:          "",
+			wantValidBefore:  now.Add(7 * 24 * time.Hour),
+			opts:             []SignerOpt{WithHostCertValidityPeriod(7 * 24 * time.Hour)},
+		},
 	}
 
 	for _, tc := range cases {
@@ -480,22 +528,41 @@ func TestSSHSigner_SignHostKey(t *testing.T) {
 				verifier,
 				"aud",
 				tc.validAWSAccounts,
+				tc.opts...,
 			)
 			if err != nil {
 				t.Fatal(err)
 			}
+			signer.clock = func() time.Time { return now }
 
 			ctx := metadata.NewIncomingContext(
 				context.Background(),
 				metadata.New(map[string]string{"authorization": "bearer " + validToken}),
 			)
 
-			_, err = signer.SignHostKey(ctx, tc.req)
+			resp, err := signer.SignHostKey(ctx, tc.req)
 			if (tc.wantErr != "" && err == nil) || (tc.wantErr == "" && err != nil) {
 				t.Fatalf("wantErr: %v, err: %v", tc.wantErr, err)
 			} else if tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("wantErr: %v, err: %v", tc.wantErr, err)
 			}
+
+			if tc.wantErr == "" {
+				akey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(resp.SignedCertificate))
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				cert, ok := akey.(*ssh.Certificate)
+				if !ok {
+					t.Fatalf("wanted a %T, got a %T", &ssh.Certificate{}, cert)
+				}
+
+				if !tc.wantValidBefore.IsZero() && !tc.wantValidBefore.Equal(time.Unix(int64(cert.ValidBefore), 0)) {
+					t.Errorf("wanted valid before %v, got %v", tc.wantValidBefore, time.Unix(int64(cert.ValidBefore), 0))
+				}
+			}
+
 		})
 	}
 }
