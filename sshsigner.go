@@ -44,12 +44,6 @@ const (
 
 var _ sshsigner.SignerServer = (*SSHSigner)(nil)
 
-// KeySource is an optional interface a Signer can implement. If it does, this
-// will be called to retrieve additional valid public keys
-type KeySource interface {
-	PublicKeys(ctx context.Context) ([]crypto.PublicKey, error)
-}
-
 // NonceRecorder is used to avoid replays
 type NonceRecorder interface {
 	// RecordNonce should note that a given nonce was used, and indicate if it
@@ -57,8 +51,43 @@ type NonceRecorder interface {
 	RecordNonce(ctx context.Context, nonce string, expires time.Time) (used bool, err error)
 }
 
+// TokenVerifier is used to verify a given JWT, returning claim information
 type TokenVerifier interface {
-	VerifyRaw(ctx context.Context, audience string, raw string, opts ...oidc.VerifyOpt) (*oidc.Claims, error)
+	VerifyRaw(ctx context.Context, audience string, rawToken string, opts ...oidc.VerifyOpt) (*oidc.Claims, error)
+}
+
+// SignerSource is used to retrieve a signer for signing operations, and
+// information about public keys considered valid for this source. This can be
+// used to wrap multiple signers / other keysets for use by this service
+type SignerSource interface {
+	// Signer should return a usable crypto.Signer, that will be used for a
+	// signing operations.
+	Signer(context.Context) (crypto.Signer, error)
+	// PublicKeys returns a list of all public keys that should be considered
+	// valid for this source.
+	PublicKeys(context.Context) ([]crypto.PublicKey, error)
+}
+
+type staticSignerSource struct {
+	signer   crypto.Signer
+	addlKeys []crypto.PublicKey
+}
+
+func (s *staticSignerSource) Signer(context.Context) (crypto.Signer, error) {
+	return s.signer, nil
+}
+
+func (s *staticSignerSource) PublicKeys(context.Context) ([]crypto.PublicKey, error) {
+	return append([]crypto.PublicKey{s.signer.Public()}, s.addlKeys...), nil
+}
+
+// NewStaticSignerSource returns a simple SignerSource that is bound to a single
+// key
+func NewStaticSignerSource(s crypto.Signer, addlKeys ...crypto.PublicKey) SignerSource {
+	return &staticSignerSource{
+		signer:   s,
+		addlKeys: addlKeys,
+	}
 }
 
 type SignerOpt func(s *SSHSigner)
@@ -66,11 +95,8 @@ type SignerOpt func(s *SSHSigner)
 type SSHSigner struct {
 	Log logrus.FieldLogger
 
-	hostSigner crypto.Signer
-	userSigner crypto.Signer
-
-	userKeySource KeySource
-	hostKeySource KeySource
+	hostSignerSource SignerSource
+	userSignerSource SignerSource
 
 	remoteCacheFor   time.Duration
 	remoteCacheSplay time.Duration
@@ -86,18 +112,6 @@ type SSHSigner struct {
 	ValidAWSAccounts []string
 
 	clock func() time.Time
-}
-
-func WithUserKeysource(ks KeySource) SignerOpt {
-	return func(s *SSHSigner) {
-		s.userKeySource = ks
-	}
-}
-
-func WithHostKeysource(ks KeySource) SignerOpt {
-	return func(s *SSHSigner) {
-		s.hostKeySource = ks
-	}
 }
 
 // WithHostCertValidityPeriod sets the duration that host certs are valid for,
@@ -117,6 +131,21 @@ func WithMaxUserCertValidityPeriod(p time.Duration) SignerOpt {
 	}
 }
 
+// WithSignersCache will cache results for public key lookups for a fixed time.
+// This can be used to reduce load for the public key endpoints
+func WithSignersCache(cacheFor time.Duration) SignerOpt {
+	return func(s *SSHSigner) {
+		s.userSignerSource = &cacheKeySource{
+			SignerSource: s.userSignerSource,
+			CacheFor:     cacheFor,
+		}
+		s.hostSignerSource = &cacheKeySource{
+			SignerSource: s.hostSignerSource,
+			CacheFor:     cacheFor,
+		}
+	}
+}
+
 // WithCacheControl will return a Cache-Control header on requests to the
 // user/host signing keys endpoint. This can be used for server control of how
 // often the client fetches keys. The header is marked private, so intermediate
@@ -130,35 +159,15 @@ func WithCacheControl(maxAge, splay time.Duration) SignerOpt {
 	}
 }
 
-// WithSignersCache will cache results for keysource lookups in memory for the
-// given time.
-func WithSignersCache(cacheFor time.Duration) SignerOpt {
-	return func(s *SSHSigner) {
-		s.userKeySource = &cacheKeySource{
-			Wrap:     s.userKeySource,
-			CacheFor: cacheFor,
-		}
-		s.hostKeySource = &cacheKeySource{
-			Wrap:     s.hostKeySource,
-			CacheFor: cacheFor,
-		}
-	}
-}
-
-// SignerSource should return a configured crypto.Signer when called. The
-// returned signer can also optionally implement the KeySource interface, if
-// there is the potential for addition public keys to be considered valid.
-type SignerSource func(ctx context.Context) (crypto.Signer, error)
-
-func New(l logrus.FieldLogger, userSigner crypto.Signer, hostSigner crypto.Signer, nonceRec NonceRecorder, v TokenVerifier, aud string, validAWSAccounts []string, opts ...SignerOpt) (*SSHSigner, error) {
+func New(l logrus.FieldLogger, userSigner SignerSource, hostSigner SignerSource, nonceRec NonceRecorder, v TokenVerifier, aud string, validAWSAccounts []string, opts ...SignerOpt) (*SSHSigner, error) {
 	ss := &SSHSigner{
 		Log:                 l.WithField("component", "sshsigner"),
 		Verifier:            v,
 		Audience:            aud,
 		ValidAWSAccounts:    validAWSAccounts,
 		NonceRec:            nonceRec,
-		userSigner:          userSigner,
-		hostSigner:          hostSigner,
+		userSignerSource:    userSigner,
+		hostSignerSource:    hostSigner,
 		userCertValidForMax: defaultMaxUserSignedValidDuration,
 		hostCertValidFor:    defaultHostSignedValidDuration,
 	}
@@ -265,7 +274,12 @@ func (s *SSHSigner) SignUserKey(ctx context.Context, req *sshsigner.SignUserKeyR
 		},
 	}
 
-	signed, err := signRequest(s.userSigner, sreq)
+	signer, err := s.userSignerSource.Signer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting signer: %v", err)
+	}
+
+	signed, err := signRequest(signer, sreq)
 	if err != nil {
 		logger.WithError(err).WithField("at", "sign-request-failed").Error()
 		return nil, status.Errorf(codes.Internal, "failed to sign user key")
@@ -362,7 +376,12 @@ func (s *SSHSigner) SignHostKey(ctx context.Context, req *sshsigner.SignHostKeyR
 		ValidBefore: now.Add(s.hostCertValidFor),
 	}
 
-	signed, err := signRequest(s.hostSigner, sreq)
+	signer, err := s.hostSignerSource.Signer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting signer: %v", err)
+	}
+
+	signed, err := signRequest(signer, sreq)
 	if err != nil {
 		logger.WithError(err).WithField("at", "sign-request-failed").Error()
 		return nil, status.Errorf(codes.Internal, "failed to sign host key")
@@ -379,7 +398,7 @@ func (s *SSHSigner) UserSigners(ctx context.Context, _ *empty.Empty) (*sshsigner
 		"ip": remoteAddrFromContext(ctx),
 	})
 
-	keys, err := validAuthKeys(ctx, s.userSigner, s.userKeySource)
+	keys, err := validAuthKeys(ctx, s.userSignerSource)
 	if err != nil {
 		logger.WithError(err).WithField("at", "get-ssh-keyset-error").Error()
 		return nil, status.Errorf(codes.Internal, "failed to retrieve keyset")
@@ -407,7 +426,7 @@ func (s *SSHSigner) HostSigners(ctx context.Context, _ *empty.Empty) (*sshsigner
 		"ip": remoteAddrFromContext(ctx),
 	})
 
-	keys, err := validAuthKeys(ctx, s.hostSigner, s.hostKeySource)
+	keys, err := validAuthKeys(ctx, s.hostSignerSource)
 	if err != nil {
 		logger.WithError(err).WithField("at", "get-ssh-keyset-error").Error()
 		return nil, status.Errorf(codes.Internal, "failed to retrieve keyset")
@@ -593,14 +612,8 @@ func remoteAddrFromContext(ctx context.Context) string {
 
 // validAuthKeys builds a list of valid SSH public keys from the signer, and the
 // KeySource if non-nil
-func validAuthKeys(ctx context.Context, s crypto.Signer, ks KeySource) ([]ssh.PublicKey, error) {
+func validAuthKeys(ctx context.Context, ks SignerSource) ([]ssh.PublicKey, error) {
 	keys := map[string]ssh.PublicKey{}
-
-	sk, err := ssh.NewPublicKey(s.Public())
-	if err != nil {
-		return nil, err
-	}
-	keys[string(sk.Marshal())] = sk
 
 	if ks != nil {
 		aks, err := ks.PublicKeys(ctx)
@@ -628,8 +641,10 @@ type groupClaims struct {
 	Groups []string `json:"groups"`
 }
 
+// cacheKeySource wraps a signer source, caching public key lookups
 type cacheKeySource struct {
-	Wrap     KeySource
+	SignerSource
+
 	CacheFor time.Duration
 
 	cached    []crypto.PublicKey
@@ -655,7 +670,7 @@ func (c *cacheKeySource) PublicKeys(ctx context.Context) ([]crypto.PublicKey, er
 	}
 
 	// fetch
-	curr, err := c.Wrap.PublicKeys(ctx)
+	curr, err := c.SignerSource.PublicKeys(ctx)
 	if err != nil {
 		return nil, err
 	}
