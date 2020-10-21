@@ -34,8 +34,8 @@ import (
 func TestSSHSigner(t *testing.T) {
 	ctx := context.Background()
 
-	hostSigner, hostKs := newMockSigner(t)
-	userSigner, userKs := newMockSigner(t)
+	hostSigner := newMockSigner(t)
+	userSigner := newMockSigner(t)
 	nonceRec := &mockNonceRecorder{}
 
 	signer, err := New(
@@ -46,8 +46,6 @@ func TestSSHSigner(t *testing.T) {
 		&fakeVerifier{},
 		"aud",
 		[]string{},
-		WithHostKeysource(hostKs),
-		WithUserKeysource(userKs),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -72,11 +70,10 @@ func TestSSHSigner(t *testing.T) {
 			t.Errorf("want 2 verification key, got %d", len(resp.VerificationKeys))
 		}
 
-		wantCKeys, err := userKs.PublicKeys(ctx)
+		wantCKeys, err := userSigner.PublicKeys(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantCKeys = append(wantCKeys, userSigner.Public())
 
 		var (
 			wantKeys []string
@@ -109,11 +106,10 @@ func TestSSHSigner(t *testing.T) {
 			t.Errorf("want 2 verification key, got %d", len(resp.VerificationKeys))
 		}
 
-		wantCKeys, err := hostKs.PublicKeys(ctx)
+		wantCKeys, err := hostSigner.PublicKeys(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantCKeys = append(wantCKeys, hostSigner.Public())
 
 		var (
 			wantKeys []string
@@ -318,8 +314,8 @@ func TestSSHSigner_SignUserKey(t *testing.T) {
 				},
 			}
 
-			hostSigner, _ := newMockSigner(t)
-			userSigner, _ := newMockSigner(t)
+			hostSigner := newMockSigner(t)
+			userSigner := newMockSigner(t)
 			nonceRec := &mockNonceRecorder{nonces: tc.playedNonces}
 
 			signer, err := New(
@@ -376,8 +372,8 @@ func TestSSHSigner_SignUserKey(t *testing.T) {
 func TestSSHSigner_SignHostKey(t *testing.T) {
 	now := time.Now().Round(time.Second) // certs only have second granularity
 
-	hostSigner, _ := newMockSigner(t)
-	userSigner, _ := newMockSigner(t)
+	hostSigner := newMockSigner(t)
+	userSigner := newMockSigner(t)
 
 	fakePublicKey, err := ssh.NewPublicKey(&rsa.PublicKey{N: big.NewInt(4), E: 65537})
 	if err != nil {
@@ -644,7 +640,12 @@ func TestAuth(t *testing.T) {
 }
 
 func TestSigner(t *testing.T) {
-	signer, _ := newMockSigner(t)
+	// just grab the crypto.signer to use here
+	signerSrc := newMockSigner(t)
+	signer, err := signerSrc.Signer(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	capub, err := ssh.NewPublicKey(signer.Public())
 	if err != nil {
@@ -731,34 +732,38 @@ func (f *fakeVerifier) VerifyRaw(ctx context.Context, audience string, raw strin
 	return t, nil
 }
 
-func newMockSigner(t *testing.T) (crypto.Signer, KeySource) {
-	var s crypto.Signer
+func newMockSigner(t *testing.T) *mockSignerSource {
 	var err error
 
-	s, err = rsa.GenerateKey(rand.Reader, 512)
+	s, err := rsa.GenerateKey(rand.Reader, 512)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	k, err := rsa.GenerateKey(rand.Reader, 512)
+	v, err := rsa.GenerateKey(rand.Reader, 512)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	return s, &mockKeysource{Signer: s, addlKey: k.Public()}
+	return &mockSignerSource{
+		signer:  s,
+		addlKey: v.Public(),
+	}
 }
 
-var _ KeySource = (*mockKeysource)(nil)
-
-type mockKeysource struct {
-	crypto.Signer
-	addlKey crypto.PublicKey
-	calls   int64
+type mockSignerSource struct {
+	signer      crypto.Signer
+	addlKey     crypto.PublicKey
+	pubkeyCalls int64
 }
 
-func (m *mockKeysource) PublicKeys(ctx context.Context) ([]crypto.PublicKey, error) {
-	atomic.AddInt64(&m.calls, 1)
-	return []crypto.PublicKey{m.addlKey}, nil
+func (s *mockSignerSource) Signer(context.Context) (crypto.Signer, error) {
+	return s.signer, nil
+}
+
+func (s *mockSignerSource) PublicKeys(context.Context) ([]crypto.PublicKey, error) {
+	atomic.AddInt64(&s.pubkeyCalls, 1)
+	return []crypto.PublicKey{s.signer.Public(), s.addlKey}, nil
 }
 
 type mockNonceRecorder struct {
@@ -781,11 +786,11 @@ func (m *mockNonceRecorder) RecordNonce(ctx context.Context, nonce string, _ tim
 func TestCache(t *testing.T) {
 	ctx := context.Background()
 
-	ks := &mockKeysource{}
+	ks := newMockSigner(t)
 
 	cache := &cacheKeySource{
-		Wrap:     ks,
-		CacheFor: 1 * time.Minute,
+		SignerSource: ks,
+		CacheFor:     1 * time.Minute,
 	}
 
 	var wg sync.WaitGroup
@@ -808,14 +813,14 @@ func TestCache(t *testing.T) {
 		t.Fatalf("errors: %v", errs)
 	}
 
-	if ks.calls != 1 {
-		t.Errorf("want ks called once, got: %d", ks.calls)
+	if ks.pubkeyCalls != 1 {
+		t.Errorf("want ks called once, got: %d", ks.pubkeyCalls)
 	}
 
 	// now try a bunch of concurrent fetches
 	cache.CacheFor = -1 * time.Minute
 	cache.nextFetch = time.Now().Add(cache.CacheFor)
-	ks.calls = 0
+	ks.pubkeyCalls = 0
 
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
@@ -834,8 +839,8 @@ func TestCache(t *testing.T) {
 		t.Fatalf("errors: %v", errs)
 	}
 
-	if ks.calls != 10 {
-		t.Errorf("want ks called 10 times, got: %d", ks.calls)
+	if ks.pubkeyCalls != 10 {
+		t.Errorf("want ks called 10 times, got: %d", ks.pubkeyCalls)
 	}
 }
 
